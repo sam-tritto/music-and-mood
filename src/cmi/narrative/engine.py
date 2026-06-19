@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from cmi.config import GOOGLE_API_KEY, NARRATIVE_MODEL, AUDIO_FEATURES
+from cmi.utils.cost_estimator import estimate_narrative_cost
 
 logger = logging.getLogger(__name__)
 
@@ -225,10 +226,23 @@ def generate_narrative(
     """
     from google.genai import types
 
-    client = _init_client()
-
     payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
     user_prompt = USER_PROMPT_TEMPLATE.format(payload_json=payload_json)
+
+    # Estimate cost locally first
+    est = estimate_narrative_cost(
+        prompt=user_prompt,
+        system_instruction=SYSTEM_PROMPT,
+        max_output_tokens=1024,
+        model=model
+    )
+    print(f"💰 [Cost Estimate] Generating narrative for {payload.get('cluster_id', 'unknown')} via {model}:")
+    print(f"   Est. Input Tokens:  {est['estimated_input_tokens']:,}")
+    print(f"   Est. Output Tokens: {est['estimated_output_tokens']:,} (approx. baseline)")
+    print(f"   Est. Cost:          ${est['estimated_cost_usd']:.6f} USD")
+    logger.info("Est. narrative cost: $%f", est['estimated_cost_usd'])
+
+    client = _init_client()
 
     response = client.models.generate_content(
         model=model,

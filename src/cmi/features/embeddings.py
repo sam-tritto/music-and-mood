@@ -18,6 +18,7 @@ import numpy as np
 from tqdm import tqdm
 
 from cmi.config import EMBEDDING_MODEL, GOOGLE_API_KEY
+from cmi.utils.cost_estimator import estimate_embedding_cost
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,13 @@ def embed_lyrics(
     np.ndarray of shape (n_texts, embedding_dim)
         embedding_dim is 768 for gemini-embedding-001
     """
+    # Estimate cost locally first
+    est = estimate_embedding_cost(texts, model)
+    print(f"💰 [Cost Estimate] Embedding {len(texts)} tracks via {model}:")
+    print(f"   Est. Tokens: {est['estimated_tokens']:,}")
+    print(f"   Est. Cost:   ${est['estimated_cost_usd']:.6f} USD")
+    logger.info("Est. embedding cost: $%f", est['estimated_cost_usd'])
+
     client = _init_client()
 
     # Pre-process: truncate long texts
