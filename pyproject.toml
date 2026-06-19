@@ -1,0 +1,37 @@
+[project]
+name = "cultural-misery-index"
+version = "0.1.0"
+description = "Multimodal music clustering × macroeconomic correlation × GenAI narrative engine"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
+    "umap-learn>=0.5",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "plotly>=5.22",
+    "spotipy>=2.24",
+    "lyricsgenius>=3.0",
+    "fredapi>=0.5",
+    "google-genai>=1.0",
+    "python-dotenv>=1.0",
+    "statsmodels>=0.14",
+    "tqdm>=4.66",
+    "nbformat>=5.10",
+    "kaggle>=1.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3",
+    "jupyter>=1.1",
+]
