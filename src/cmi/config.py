@@ -56,8 +56,8 @@ TIME_WINDOW: str = "MS"  # Monthly Start — pandas offset alias
 # ---------------------------------------------------------------------------
 # Model names (Google GenAI)
 # ---------------------------------------------------------------------------
-EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-NARRATIVE_MODEL: str = os.getenv("NARRATIVE_MODEL", "gemini-3.5-flash")
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-004")
+NARRATIVE_MODEL: str = os.getenv("NARRATIVE_MODEL", "gemini-2.5-flash")
 
 # ---------------------------------------------------------------------------
 # Region & date range
