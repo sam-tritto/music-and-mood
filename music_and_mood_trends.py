@@ -264,8 +264,20 @@ for _, row in sample.iterrows():
 tracks_with_text = tracks_with_lyrics[tracks_with_lyrics["lyrics"].notna()].copy()
 lyrics_list = tracks_with_text["lyrics"].tolist()
 
-print(f"📝 Embedding {len(lyrics_list)} lyric texts via gemini-embedding-001...")
-lyric_embeddings = embed_lyrics(lyrics_list)
+embeddings_cache_path = DATA_PROCESSED / "lyric_embeddings.npy"
+
+if embeddings_cache_path.exists():
+    print("⏳ Loading cached lyric embeddings from disk...")
+    lyric_embeddings = np.load(embeddings_cache_path)
+    if len(lyric_embeddings) != len(lyrics_list):
+        print(f"⚠️ Cache mismatch: expected {len(lyrics_list)} embeddings, found {len(lyric_embeddings)}. Re-embedding...")
+        lyric_embeddings = embed_lyrics(lyrics_list)
+        np.save(embeddings_cache_path, lyric_embeddings)
+else:
+    print(f"📝 Embedding {len(lyrics_list)} lyric texts via gemini-embedding-001...")
+    lyric_embeddings = embed_lyrics(lyrics_list)
+    np.save(embeddings_cache_path, lyric_embeddings)
+
 print(f"   Embedding matrix: {lyric_embeddings.shape}")
 
 # %% [markdown]
