@@ -135,10 +135,10 @@ def fetch_lyrics_batch(
     # Initialize Genius client
     genius = lyricsgenius.Genius(
         access_token,
-        verbose=False,
         remove_section_headers=False,  # We do our own cleaning
         retries=3,
     )
+    genius.verbose = False
 
     results: list[str | None] = []
 
