@@ -63,14 +63,19 @@ def download_dataset():
 
 if __name__ == "__main__":
     # Check for kaggle credentials
+    import os
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
-    if not kaggle_json.exists():
+    has_env_credentials = os.getenv("KAGGLE_USERNAME") and os.getenv("KAGGLE_KEY")
+    
+    if not kaggle_json.exists() and not has_env_credentials:
         print("❌ Kaggle credentials not found!")
         print()
         print("To set up Kaggle API access:")
-        print("  1. Go to https://www.kaggle.com/settings")
-        print("  2. Scroll to 'API' section → Click 'Create New Token'")
-        print("  3. Run these commands:")
+        print("  Option 1: Add credentials to your .env file:")
+        print("     KAGGLE_USERNAME=your_username")
+        print("     KAGGLE_KEY=your_api_key")
+        print()
+        print("  Option 2: Place your kaggle.json:")
         print("     mkdir -p ~/.kaggle")
         print("     mv ~/Downloads/kaggle.json ~/.kaggle/")
         print("     chmod 600 ~/.kaggle/kaggle.json")
