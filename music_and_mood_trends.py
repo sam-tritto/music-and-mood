@@ -228,10 +228,20 @@ unique_tracks = get_unique_tracks(charts_df)
 print(f"🎤 Unique tracks to fetch lyrics for: {len(unique_tracks)}")
 display(unique_tracks.head(10))
 
-# %%
 # Fetch lyrics (cached — only hits API for uncached tracks)
 # ⚠️ SLOW on first run (~1.5s per track). Comment this cell if you want to skip lyrics.
-tracks_with_lyrics = fetch_lyrics_batch(unique_tracks)
+lyrics_df_path = DATA_PROCESSED / "tracks_with_lyrics.csv"
+
+if lyrics_df_path.exists():
+    print("⏳ Loading pre-compiled tracks with lyrics from disk...")
+    tracks_with_lyrics = pd.read_csv(lyrics_df_path)
+    # Ensure NaN/missing lyrics are represented as None/object for processing
+    tracks_with_lyrics["lyrics"] = tracks_with_lyrics["lyrics"].where(tracks_with_lyrics["lyrics"].notna(), None)
+else:
+    tracks_with_lyrics = fetch_lyrics_batch(unique_tracks)
+    # Save the dataframe for quick loading next time
+    tracks_with_lyrics.to_csv(lyrics_df_path, index=False)
+    print(f"💾 Saved compiled tracks with lyrics to: {lyrics_df_path}")
 
 lyrics_found = tracks_with_lyrics["lyrics"].notna().sum()
 print(f"\n✅ Lyrics found: {lyrics_found} / {len(tracks_with_lyrics)} ({100*lyrics_found/len(tracks_with_lyrics):.1f}%)")
@@ -241,6 +251,27 @@ sample = tracks_with_lyrics[tracks_with_lyrics["lyrics"].notna()].head(3)
 for _, row in sample.iterrows():
     print(f"\n🎵 {row['title']} — {row['artist']}")
     print(f"   {row['lyrics'][:200]}...")
+
+# %% [markdown]
+# ### 1.4 Raw Audio Complexity Feature Engineering (Spotify API)
+#
+# We tap into the raw audio analysis endpoint to fetch chroma (pitch) and timbre
+# vectors. We calculate:
+# - **Harmonic Entropy**: a measure of chord complexity and predictability.
+# - **Timbral Variance**: standard deviation of timbre coefficients over time (roughness/compression).
+#
+# If no Spotify credentials are set in `.env`, it defaults to offline fallback baselines.
+
+# %%
+from cmi.features.audio_analysis import fetch_audio_complexity_batch
+
+complexity_df = fetch_audio_complexity_batch(unique_tracks)
+print(f"\n✅ Audio complexity features calculated: {complexity_df.shape}")
+display(complexity_df.head(10))
+
+# Merge complexity features back into unique_tracks and tracks_with_lyrics
+unique_tracks = unique_tracks.merge(complexity_df, on="track_id", how="left")
+tracks_with_lyrics = tracks_with_lyrics.merge(complexity_df, on="track_id", how="left")
 
 # %% [markdown]
 # ---

@@ -21,6 +21,8 @@ load_dotenv(_PROJECT_ROOT / ".env")
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 GENIUS_ACCESS_TOKEN: str = os.getenv("GENIUS_ACCESS_TOKEN", "")
 FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
+SPOTIPY_CLIENT_ID: str = os.getenv("SPOTIPY_CLIENT_ID", "")
+SPOTIPY_CLIENT_SECRET: str = os.getenv("SPOTIPY_CLIENT_SECRET", "")
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -28,13 +30,14 @@ FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
 DATA_RAW: Path = _PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED: Path = _PROJECT_ROOT / "data" / "processed"
 LYRICS_CACHE: Path = DATA_RAW / "lyrics_cache"
+AUDIO_ANALYSIS_CACHE: Path = DATA_RAW / "audio_analysis_cache"
 
 # Ensure directories exist
-for _dir in (DATA_RAW, DATA_PROCESSED, LYRICS_CACHE):
+for _dir in (DATA_RAW, DATA_PROCESSED, LYRICS_CACHE, AUDIO_ANALYSIS_CACHE):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Audio feature columns (from Spotify / Kaggle dataset)
+# Audio feature columns (from Spotify / Kaggle dataset + custom analysis)
 # ---------------------------------------------------------------------------
 AUDIO_FEATURES: list[str] = [
     "danceability",
@@ -44,6 +47,8 @@ AUDIO_FEATURES: list[str] = [
     "tempo",
     "speechiness",
     "instrumentalness",
+    "harmonic_entropy",
+    "timbral_variance",
 ]
 
 # ---------------------------------------------------------------------------
