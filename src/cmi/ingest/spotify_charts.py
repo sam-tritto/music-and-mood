@@ -81,39 +81,49 @@ def load_charts(
     date_end: str = DATE_END,
 ) -> pd.DataFrame:
     """
-    Load and clean a Kaggle Spotify Top 200 CSV.
-
-    Parameters
-    ----------
-    csv_path : path to the CSV file
-    region : filter to this region (e.g. 'us'). Set to None to keep all.
-    date_start / date_end : ISO date strings for the time range filter.
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        track_id, title, artist, date, year_month, streams, rank,
-        + AUDIO_FEATURES (danceability, energy, valence, ...)
+    Load and clean Billboard Hot 100 charts joined with audio features.
+    Saves disk space and memory compared to the massive 27 GB global Spotify dataset.
     """
-    logger.info("Loading chart data from %s", csv_path)
-    df = pd.read_csv(csv_path, low_memory=False)
-    logger.info("Raw shape: %s", df.shape)
+    raw_dir = Path(csv_path).parent
+    charts_path = raw_dir / "Hot Stuff.csv"
+    features_path = raw_dir / "Hot 100 Audio Features.csv"
 
-    # Normalize column names
-    df = _normalize_columns(df)
+    if not (charts_path.exists() and features_path.exists()):
+        raise FileNotFoundError(
+            f"Billboard files not found in {raw_dir}. "
+            "Please run download_kaggle_data.py to get them."
+        )
+
+    logger.info("Loading Billboard charts from %s", charts_path)
+    charts_df = pd.read_csv(charts_path)
+    logger.info("Loading audio features from %s", features_path)
+    features_df = pd.read_csv(features_path).drop_duplicates(subset=["SongID"])
+
+    # Merge on SongID
+    logger.info("Merging charts with audio features...")
+    df = charts_df.merge(features_df, on="SongID", how="inner")
+    logger.info("Merged shape: %s", df.shape)
+
+    # Rename columns to match canonical names
+    df = df.rename(columns={
+        "Song_x": "title",
+        "Performer_x": "artist",
+        "WeekID": "date",
+        "Week Position": "rank",
+    })
+
+    # Extract track_id (prefer spotify_track_id, fallback to SongID)
+    if "spotify_track_id" in df.columns:
+        df["track_id"] = df["spotify_track_id"].fillna(df["SongID"])
+    else:
+        df["track_id"] = df["SongID"]
+
+    # Clean track ID
     df = _clean_track_id(df)
 
-    # --- Region filter ---
-    region_col = None
-    for candidate in ("region", "country", "chart"):
-        if candidate in df.columns:
-            region_col = candidate
-            break
-
-    if region_col and region:
-        df[region_col] = df[region_col].astype(str).str.strip().str.lower()
-        df = df[df[region_col] == region.lower()].copy()
-        logger.info("Filtered to region='%s': %d rows", region, len(df))
+    # Add dummy region and streams since Billboard is US-only and doesn't report streams
+    df["region"] = "us"
+    df["streams"] = 0
 
     # --- Date parsing & filtering ---
     if "date" in df.columns:
@@ -123,21 +133,13 @@ def load_charts(
         df["year_month"] = df["date"].dt.to_period("M")
         logger.info("Date-filtered to %s – %s: %d rows", date_start, date_end, len(df))
 
-    # --- Streams to numeric ---
-    if "streams" in df.columns:
-        df["streams"] = pd.to_numeric(df["streams"], errors="coerce").fillna(0).astype(int)
-
     # --- Validate audio features exist ---
     missing_features = [f for f in AUDIO_FEATURES if f not in df.columns]
     if missing_features:
-        logger.warning(
-            "Missing audio features in dataset: %s. "
-            "These will be NaN — you may need a different Kaggle source.",
-            missing_features,
-        )
+        logger.warning("Missing audio features in dataset: %s", missing_features)
 
     # --- Deduplicate: keep one row per (track_id, date) ---
-    id_col = "track_id" if "track_id" in df.columns else "title"
+    id_col = "track_id"
     if "date" in df.columns:
         before = len(df)
         df = df.drop_duplicates(subset=[id_col, "date"], keep="first")

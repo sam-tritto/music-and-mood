@@ -32,8 +32,8 @@ def download_dataset():
     api = KaggleApi()
     api.authenticate()
 
-    # Primary dataset: comprehensive Spotify charts with metadata
-    dataset_slug = "dhruvildave/spotify-charts"
+    # Primary dataset: Billboard Hot 100 charts with audio features
+    dataset_slug = "thedevastator/billboard-hot-100-audio-features"
     download_dir = DATA_RAW
 
     print(f"📥 Downloading dataset: {dataset_slug}")
