@@ -35,7 +35,7 @@
 # [FRED API: Misery Index] ───┐
 #                             ▼
 # [Kaggle: Audio Features] ──► [Feature Fusion] ──► [Temporal Clustering] ──► [Econometric Mapping] ──► [GenAI Narrator]
-# [Genius API: Lyrics]     ──►  (UMAP/PCA)           (Hungarian Algo)          (Rolling Correlation)      (Gemini 3.5 Flash)
+# [Genius API: Lyrics]     ──►  (UMAP/PCA)           (Hungarian Algo)          (Rolling Correlation)      (Gemini 2.5 Flash)
 # ```
 
 # %% [markdown]
@@ -89,7 +89,10 @@ from cmi.correlation.econometrics import (
     compute_volumetric_shares, rolling_correlation,
     static_correlation, granger_causality, classify_clusters,
 )
-from cmi.narrative.engine import build_cluster_payload, generate_narrative, generate_full_report
+from cmi.narrative.engine import (
+    build_cluster_payload, generate_narrative, generate_full_report,
+    generate_brief_descriptions
+)
 
 print("✅ CMI pipeline modules loaded")
 print(f"   Region: {REGION}")
@@ -311,6 +314,41 @@ else:
 
 print(f"   Embedding matrix: {lyric_embeddings.shape}")
 
+# Programmatically detect and filter Genius scraping anomalies (tracklist/chart list dumps)
+import re
+
+def is_anomalous_tracklist(lyrics):
+    if not isinstance(lyrics, str):
+        return False
+    lines = lyrics.split("\n")
+    dash_lines = sum(1 for line in lines if " - " in line or " – " in line or " — " in line)
+    indicators = [
+        "top canciones", "top songs", "tracklist", "track list", "album tracklist",
+        "playlist", "compilacion", "curated by", "billboard hot 100", "top tracks"
+    ]
+    has_indicator = any(ind in lyrics.lower() for ind in indicators)
+    list_lines = sum(1 for line in lines if re.match(r"^\s*(\d+[\.\)]|\[\d+\])", line.strip()))
+    
+    if dash_lines > 5 and len(lines) > 5 and (dash_lines / len(lines)) > 0.4:
+        return True
+    if list_lines > 5 and len(lines) > 5 and (list_lines / len(lines)) > 0.4:
+        return True
+    if has_indicator and dash_lines > 3:
+        return True
+    return False
+
+# Create boolean mask
+is_anomaly = tracks_with_text["lyrics"].apply(is_anomalous_tracklist).values
+clean_mask = ~is_anomaly
+
+# Apply mask to both tracks_with_text and lyric_embeddings without invalidating the cache
+print(f"✂️ Filtering out {sum(is_anomaly)} anomalous tracklist dumps...")
+tracks_with_text = tracks_with_text[clean_mask].copy()
+lyric_embeddings = lyric_embeddings[clean_mask]
+
+print(f"   Cleaned tracks: {len(tracks_with_text)}")
+print(f"   Cleaned embedding matrix: {lyric_embeddings.shape}")
+
 # %% [markdown]
 # ### 2.2 Dimensionality Reduction (UMAP)
 
@@ -365,19 +403,25 @@ print(f"   Feature dimensions: {audio_matrix.shape[1]} audio + {reduced_lyrics.s
 # ### 3.1 Optimal K Selection
 
 # %%
-# Elbow plot + silhouette analysis
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+# %%
+# Native Yellowbrick KElbowVisualizer
+from yellowbrick.cluster import KElbowVisualizer
+from sklearn.cluster import KMeans
 
-elbow_plot(fused_matrix, k_range=range(2, 12), ax=ax1)
-_, sil_scores = silhouette_analysis(fused_matrix, k_range=range(2, 12), ax=ax2)
+print("📊 Running yellowbrick KElbowVisualizer to auto-detect elbow value...")
+model = KMeans(random_state=42, n_init=10)
+# Locate elbow over k=(4, 30) using distortion metric (inertia)
+visualizer = KElbowVisualizer(model, k=(4, 30), force_model=True)
+visualizer.fit(fused_matrix)
+visualizer.show()
 
-plt.suptitle("Cluster Count Diagnostics", fontsize=16, fontweight="bold", y=1.02)
-plt.tight_layout()
-plt.show()
+# Run the programmatic 2-step optimal K search locally around the elbow (+/- 2) by silhouette score
+from cmi.clustering.diagnostics import find_optimal_k
+optimal_k = find_optimal_k(fused_matrix, k_range=(4, 30))
+print(f"\n🏆 Dynamic Optimal K Selected: {optimal_k}")
 
-best_k = max(sil_scores, key=sil_scores.get)
-print(f"\n🏆 Best K by silhouette score: {best_k} (score: {sil_scores[best_k]:.4f})")
-print(f"   Using K={K_CLUSTERS} as specified in config")
+K_CLUSTERS = optimal_k
+print(f"   Set K_CLUSTERS to dynamic optimal value: {K_CLUSTERS}")
 
 # %% [markdown]
 # ### 3.2 Temporal Clustering with Hungarian Alignment
@@ -474,6 +518,39 @@ if timeline.drift_velocities:
     fig.show()
 
 # %% [markdown]
+# ### 3.4 Nested Sub-Clustering
+# 
+# To find more granular sub-vibe profiles, we perform a secondary clustering
+# step globally within each of our parent temporal clusters. This splits each main 
+# vibe archetype into $M=2$ specific sub-profiles.
+
+# %%
+from cmi.clustering.temporal import sub_cluster_parent_clusters
+
+# Perform sub-clustering globally on tracks within each parent cluster
+sub_labels = sub_cluster_parent_clusters(fused_matrix, timeline.labels, n_sub_clusters=2)
+
+# Save sub-labels back to dataframe
+tracks_with_text["sub_cluster"] = sub_labels
+
+print("\n📊 Sub-Cluster Distribution:")
+sub_counts = tracks_with_text["sub_cluster"].value_counts().sort_index()
+for compound_id, count in sub_counts.items():
+    parent_id = compound_id // 10
+    sub_id = compound_id % 10
+    print(f"Parent Cluster {parent_id} -> Sub-Cluster {sub_id}: {count} tracks")
+
+# Let's inspect a few tracks from each sub-cluster to understand the mood profiles
+print("\n🔍 Sub-Cluster Samples:")
+for compound_id in sorted(sub_counts.index):
+    parent_id = compound_id // 10
+    sub_id = compound_id % 10
+    subset = tracks_with_text[tracks_with_text["sub_cluster"] == compound_id].head(3)
+    print(f"\n🎵 [Parent {parent_id} -> Sub {sub_id}] (Total: {sub_counts[compound_id]} tracks)")
+    for _, row in subset.iterrows():
+        print(f"   - {row['title']} by {row['artist']} (Valence: {row['valence']:.2f}, Energy: {row['energy']:.2f})")
+
+# %% [markdown]
 # ---
 # ## 4. Econometric Analysis — Music vs. The Economy
 #
@@ -531,8 +608,6 @@ fig.show()
 # Granger causality test (up to 3-month lag)
 granger_results = granger_causality(cluster_shares, misery_df, max_lag=3)
 print("🔬 Granger Causality Results (p < 0.05 = significant):")
-display(granger_results)
-
 # Highlight significant results
 significant = granger_results[granger_results["p_value"] < 0.05]
 if len(significant) > 0:
@@ -543,105 +618,27 @@ else:
     print("\n   No significant Granger-causal relationships at p < 0.05")
 
 # %% [markdown]
-# ### 4.4 The Cultural Misery Index Dashboard
-
-# %%
-# Overlay: Cluster shares + Misery Index on the same timeline
-fig = make_subplots(
-    rows=2, cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.08,
-    subplot_titles=("Cluster Volumetric Shares (%)", "Misery Index"),
-    row_heights=[0.65, 0.35],
-)
-
-# Top panel: stacked cluster shares
-colors = px.colors.qualitative.Set2[:K_CLUSTERS]
-for i, col in enumerate(cluster_shares.columns):
-    fig.add_trace(
-        go.Scatter(
-            x=cluster_shares.index,
-            y=cluster_shares[col],
-            name=col.replace("cluster_", "Cluster "),
-            stackgroup="one",
-            line=dict(width=0.5),
-            fillcolor=colors[i % len(colors)],
-        ),
-        row=1, col=1,
-    )
-
-# Bottom panel: Misery Index
-fig.add_trace(
-    go.Scatter(
-        x=misery_df["date"],
-        y=misery_df["misery_index"],
-        name="Misery Index",
-        line=dict(color="#e74c3c", width=2.5),
-        fill="tozeroy",
-        fillcolor="rgba(231, 76, 60, 0.15)",
-    ),
-    row=2, col=1,
-)
-
-fig.update_layout(
-    title="🎵 The Cultural Misery Index Dashboard",
-    template="plotly_dark",
-    height=700,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    showlegend=True,
-)
-fig.show()
-
-# %% [markdown]
 # ---
 # ## 5. GenAI Narrative Engine — The Story Behind the Data
 #
 # Instead of just plotting charts, we generate a structured data payload for each
-# cluster and prompt **Gemini 3.5 Flash** to write the cultural digest.
-#
-# The LLM acts as an "economic sociologist and cultural critic," interpreting
-# what the sonic and semantic properties tell us about consumer coping mechanisms.
-
-# %% [markdown]
-# ### 5.1 Build Cluster Payloads
+# cluster and prompt **Gemini 2.5 Flash** to write the cultural digest.
 
 # %%
-# Build payloads for each cluster during key economic periods
+# Build payloads for each cluster
 payloads = []
-
-# Identify key periods from the Misery Index
-# (we'll pick the highest and lowest misery periods for contrast)
-misery_df_sorted = misery_df.sort_values("misery_index", ascending=False)
-high_misery_period = misery_df_sorted.head(6)  # Top 6 months of economic stress
-low_misery_period = misery_df_sorted.tail(6)   # Bottom 6 months of economic calm
-
-print("📊 High-stress economic periods:")
-display(high_misery_period[["date", "misery_index", "unemployment_rate", "yoy_inflation"]])
-
-print("\n📊 Low-stress economic periods:")
-display(low_misery_period[["date", "misery_index", "unemployment_rate", "yoy_inflation"]])
-
-# %%
-# Build a payload for each cluster
 for cluster_id in range(K_CLUSTERS):
-    # Get data for this cluster
     mask = timeline.labels == cluster_id
     cluster_data = tracks_with_text[mask].copy() if sum(mask) > 0 else pd.DataFrame()
 
     if len(cluster_data) == 0:
         continue
 
-    # Get centroid (from the last available month)
-    last_month = sorted(timeline.centroids_by_month.keys())[-1]
-    centroids = timeline.centroids_by_month[last_month]
-    centroid = centroids[cluster_id] if cluster_id < len(centroids) else np.zeros(fused_matrix.shape[1])
-
-    # Get correlation
+    centroid = cluster_data[AUDIO_FEATURES].mean().values
     cluster_col = f"cluster_{cluster_id}"
     corr_row = static_corr[static_corr["cluster"] == cluster_col]
     corr_val = corr_row["pearson_r"].values[0] if len(corr_row) > 0 else 0.0
 
-    # Volume share delta
     if timeline.volumetric_shares is not None:
         shares = timeline.volumetric_shares[cluster_col]
         if len(shares) > 1:
@@ -664,60 +661,150 @@ for cluster_id in range(K_CLUSTERS):
     )
     payloads.append(payload)
 
-print(f"📦 Built {len(payloads)} cluster payloads")
+# Generate descriptions
+brief_descriptions = generate_brief_descriptions(payloads, model="gemini-2.5-flash")
+cluster_name_mapping = {d["cluster_id"]: d["name"] for d in brief_descriptions}
 
-# Preview one
-import json
-print("\nSample payload:")
-print(json.dumps(payloads[0], indent=2))
+# Display the descriptions as rendered markdown in the notebook
+brief_markdown = []
+for desc in brief_descriptions:
+    brief_markdown.append(f"### 🎵 {desc['name']} ({desc['cluster_id']})\n\n**Description:** {desc['description']}\n")
+display(Markdown("\n".join(brief_markdown)))
 
-# %% [markdown]
-# ### 5.2 Generate Cultural Narratives
-
-# %%
-# Generate the full Cultural Misery Index report
-print("🤖 Generating narratives via Gemini 3.5 Flash...\n")
-report = generate_full_report(payloads)
-
-# Display the report as rendered markdown
-display(Markdown(report))
-
-# %%
-# Save the report to disk
+# Save report
+report_sections = ["# 🎵 Cultural Misery Index - Cluster Descriptions\n\n"]
+for desc in brief_descriptions:
+    report_sections.append(f"## {desc['name']} ({desc['cluster_id']})\n\n{desc['description']}\n\n---\n")
 report_path = DATA_PROCESSED / "cultural_misery_index_report.md"
-report_path.write_text(report)
+report_path.write_text("".join(report_sections))
 print(f"💾 Report saved to: {report_path}")
 
 # %% [markdown]
 # ---
-# ## 6. Key Findings & Interpretation
-#
-# The Cultural Misery Index reveals how music acts as a collective emotional
-# barometer. Key patterns to look for:
-#
-# - **Reactive clusters** (positive Misery correlation): These "vibes" expand
-#   when people are stressed — potentially serving as escapism or emotional processing
-#
-# - **Counter-cyclical clusters** (negative Misery correlation): These contract
-#   during stress — perhaps too frivolous or optimistic for hard times
-#
-# - **Stable clusters** (low correlation): Enduring musical archetypes that
-#   persist regardless of economic conditions
-#
-# - **The COVID Signature**: The 2020 unemployment spike should produce a
-#   visible discontinuity in cluster dynamics — look for rapid shifts in
-#   the dashboard around March–June 2020
-#
-# - **The Inflation Wave**: 2021–2022 saw sustained economic anxiety — does
-#   this correlate with a gradual drift in dominant clusters?
+# ## 4.4 The Cultural Misery Index Dashboard
 
 # %%
-# Final summary table
-print("📋 Cluster Summary:")
+# Align the timelines to the overlapping date range
+cluster_shares_ts = cluster_shares.copy()
+if hasattr(cluster_shares_ts.index, 'to_timestamp'):
+    cluster_shares_ts.index = cluster_shares_ts.index.to_timestamp()
+else:
+    cluster_shares_ts.index = pd.to_datetime(cluster_shares_ts.index)
+
+# Find intersection of dates
+start_date = max(cluster_shares_ts.index.min(), pd.to_datetime(misery_df["date"].min()))
+end_date = min(cluster_shares_ts.index.max(), pd.to_datetime(misery_df["date"].max()))
+
+print(f"📐 Aligning dashboard timeline to overlap: {start_date.strftime('%Y-%m')} to {end_date.strftime('%Y-%m')}")
+
+cluster_shares_filtered = cluster_shares_ts.loc[start_date:end_date]
+misery_df_filtered = misery_df[(misery_df["date"] >= start_date) & (misery_df["date"] <= end_date)]
+
+# Overlay: Cluster shares + Misery Index on the same timeline
+fig = make_subplots(
+    rows=2, cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.08,
+    subplot_titles=("Cluster Volumetric Shares (% of Top 200 Streams)", "Okun's Misery Index (Unemployment + YoY Inflation)"),
+    row_heights=[0.65, 0.35],
+)
+
+# Top panel: stacked cluster shares using a non-repeating qualitative color palette (Dark24)
+colors = px.colors.qualitative.Dark24
+for i, col in enumerate(cluster_shares_filtered.columns):
+    # Retrieve the catchy name from mapping using string lookup (e.g. Cluster_0)
+    catchy_name = cluster_name_mapping.get(col.replace("cluster_", "Cluster_"), col.replace("cluster_", "Cluster "))
+    fig.add_trace(
+        go.Scatter(
+            x=cluster_shares_filtered.index,
+            y=cluster_shares_filtered[col],
+            name=f"{catchy_name}",
+            stackgroup="one",
+            mode="lines",
+            line=dict(width=0.5),
+            fillcolor=colors[i % len(colors)],
+        ),
+        row=1, col=1,
+    )
+
+# Bottom panel: Misery Index
+fig.add_trace(
+    go.Scatter(
+        x=misery_df_filtered["date"],
+        y=misery_df_filtered["misery_index"],
+        name="Misery Index",
+        line=dict(color="#e74c3c", width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(231, 76, 60, 0.15)",
+    ),
+    row=2, col=1,
+)
+
+fig.update_xaxes(
+    showgrid=True,
+    gridwidth=1,
+    gridcolor="rgba(255,255,255,0.08)",
+    tickfont=dict(size=11),
+    row=1, col=1,
+)
+fig.update_xaxes(
+    showgrid=True,
+    gridwidth=1,
+    gridcolor="rgba(255,255,255,0.08)",
+    tickfont=dict(size=11),
+    row=2, col=1,
+)
+
+fig.update_yaxes(
+    showgrid=True,
+    gridwidth=1,
+    gridcolor="rgba(255,255,255,0.08)",
+    tickfont=dict(size=11),
+    row=1, col=1,
+)
+fig.update_yaxes(
+    showgrid=True,
+    gridwidth=1,
+    gridcolor="rgba(255,255,255,0.08)",
+    tickfont=dict(size=11),
+    row=2, col=1,
+)
+
+fig.update_layout(
+    template="plotly_dark",
+    height=750,
+    margin=dict(t=100, b=50, l=60, r=260),
+    font=dict(family="Inter, sans-serif"),
+    title=dict(
+        text="🎵 The Cultural Misery Index Dashboard",
+        font=dict(size=22),
+        y=0.96,
+        x=0.5,
+        xanchor="center"
+    ),
+    legend=dict(
+        orientation="v",
+        yanchor="top",
+        y=1,
+        xanchor="left",
+        x=1.02,
+        font=dict(size=10),
+    ),
+    showlegend=True,
+)
+fig.show()
+
+# %% [markdown]
+# ---
+# ## 6. Key Findings & Interpretation
+
+# %%
 summary_rows = []
 for payload in payloads:
+    cid = payload["cluster_id"]
     row = {
-        "Cluster": payload["cluster_id"],
+        "Cluster": cid,
+        "Catchy Name": cluster_name_mapping.get(cid, "Unnamed"),
         "Tracks": payload["n_tracks"],
         "Misery Correlation": payload["economic_metrics"]["misery_index_correlation"],
         "Volume Delta": payload["economic_metrics"]["volume_share_delta"],

@@ -18,7 +18,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-from cmi.config import GOOGLE_API_KEY, NARRATIVE_MODEL, AUDIO_FEATURES
+from cmi.config import GOOGLE_API_KEY, NARRATIVE_MODEL, AUDIO_FEATURES, DATA_PROCESSED
 from cmi.utils.cost_estimator import estimate_narrative_cost
 
 logger = logging.getLogger(__name__)
@@ -296,3 +296,178 @@ def generate_full_report(
     report = "\n".join(sections)
     logger.info("Full report generated: %d sections, %d chars", len(payloads), len(report))
     return report
+
+
+# ---------------------------------------------------------------------------
+# Brief Narrative Generator prompts and function
+# ---------------------------------------------------------------------------
+BRIEF_SYSTEM_PROMPT = """\
+You are an expert musicologist, economic sociologist, and cultural critic. \
+Your task is to analyze structured data payloads representing music clusters \
+and provide a concise, catchy name and a brief summary for each.
+"""
+
+BRIEF_USER_PROMPT_TEMPLATE = """\
+I am providing a JSON payload representing a music cluster.
+
+```json
+{payload_json}
+```
+
+Please analyze this cluster and return a JSON object with the following fields:
+1. **name**: A thoughtful, creative, and catchy name for this cluster (e.g. "Bedroom Melancholia", "Escapist Neon Rave").
+2. **description**: A concise 1-3 sentence description of the cluster. The description must capture the musical style (based on audio features), lyrical themes (based on top keywords), and the cultural/emotional vibe. The description must be exactly 1 to 3 sentences long.
+
+Return ONLY a valid JSON object. Do not include markdown formatting or extra text outside the JSON.
+"""
+
+
+def generate_brief_descriptions(
+    payloads: list[dict],
+    model: str = NARRATIVE_MODEL,
+    use_cache: bool = True,
+) -> list[dict]:
+    """
+    Generate brief descriptions (catchy name + 1-3 sentence description) for all clusters.
+    Prints the total estimated cost for all clusters combined *before* calling the Gemini API.
+    Uses a local cache file to avoid duplicate API requests.
+
+    Parameters
+    ----------
+    payloads : list of cluster payload dicts
+    model : Gemini model name (default: gemini-2.5-flash)
+    use_cache : if True, load existing descriptions from disk to skip API calls
+
+    Returns
+    -------
+    list of dicts containing cluster_id, name, and description
+    """
+    from google.genai import types
+
+    cache_path = DATA_PROCESSED / "brief_descriptions_cache.json"
+    cache = {}
+    if use_cache and cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            logger.info("Loaded %d descriptions from cache file: %s", len(cache), cache_path)
+        except Exception as e:
+            logger.warning("Failed to load brief descriptions cache: %s", e)
+
+    # 1. Total cost estimation before running API calls (only for uncached payloads)
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+    uncached_payloads = []
+
+    for payload in payloads:
+        cluster_id = payload.get("cluster_id", "Unknown")
+        if use_cache and cluster_id in cache:
+            continue
+        
+        uncached_payloads.append(payload)
+        payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
+        user_prompt = BRIEF_USER_PROMPT_TEMPLATE.format(payload_json=payload_json)
+        
+        # Estimate cost using the cost_estimator
+        est = estimate_narrative_cost(
+            prompt=user_prompt,
+            system_instruction=BRIEF_SYSTEM_PROMPT,
+            max_output_tokens=2048,
+            model=model
+        )
+        total_input_tokens += est["estimated_input_tokens"]
+        total_output_tokens += est["estimated_output_tokens"]
+        total_cost += est["estimated_cost_usd"]
+
+    print("\n💰 ==================================================")
+    print(f"💰 [Pre-Execution Cost Estimate] Model: {model}")
+    print(f"💰 Uncached Clusters to Process: {len(uncached_payloads)} / {len(payloads)}")
+    print(f"💰 Total Expected Input Tokens:  {total_input_tokens:,}")
+    print(f"💰 Total Expected Output Tokens: {total_output_tokens:,} (approx. baseline + reasoning)")
+    print(f"💰 Total Estimated Cost:         ${total_cost:.6f} USD")
+    print("💰 ==================================================\n")
+
+    client = None
+    results = []
+
+    for payload in payloads:
+        cluster_id = payload.get("cluster_id", "Unknown")
+        if use_cache and cluster_id in cache:
+            results.append({
+                "cluster_id": cluster_id,
+                "name": cache[cluster_id]["name"],
+                "description": cache[cluster_id]["description"]
+            })
+            continue
+
+        print(f"🤖 Generating brief description for {cluster_id}...")
+        if client is None:
+            client = _init_client()
+
+        payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
+        user_prompt = BRIEF_USER_PROMPT_TEMPLATE.format(payload_json=payload_json)
+
+        try:
+            response = client.models.generate_content(
+                model=model,
+                config=types.GenerateContentConfig(
+                    system_instruction=BRIEF_SYSTEM_PROMPT,
+                    temperature=0.7,
+                    max_output_tokens=2048,
+                    response_mime_type="application/json",
+                ),
+                contents=user_prompt,
+            )
+            resp_text = response.text or "{}"
+        except Exception as e:
+            logger.error("Gemini API call failed for %s: %s", cluster_id, e)
+            resp_text = "{}"
+
+        parsed_success = False
+        parsed_data = {}
+        
+        # Try parsing JSON
+        try:
+            parsed_data = json.loads(resp_text)
+            parsed_success = True
+        except Exception:
+            # Fallback parsing
+            clean_text = resp_text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
+            try:
+                parsed_data = json.loads(clean_text)
+                parsed_success = True
+            except Exception:
+                pass
+
+        if parsed_success:
+            name = parsed_data.get("name", f"Unnamed Cluster {cluster_id}")
+            description = parsed_data.get("description", "No description generated.")
+        else:
+            name = f"Cluster {cluster_id}"
+            description = resp_text if resp_text != "{}" else "API generation failed."
+
+        results.append({
+            "cluster_id": cluster_id,
+            "name": name,
+            "description": description,
+        })
+
+        # Save to cache immediately if successful
+        if parsed_success or (resp_text != "{}"):
+            cache[cluster_id] = {
+                "name": name,
+                "description": description
+            }
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                logger.warning("Failed to write brief descriptions cache: %s", e)
+
+    return results

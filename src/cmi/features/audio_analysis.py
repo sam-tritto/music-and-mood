@@ -25,32 +25,85 @@ from cmi.config import (
     AUDIO_ANALYSIS_CACHE,
     SPOTIPY_CLIENT_ID,
     SPOTIPY_CLIENT_SECRET,
+    DATA_RAW,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _init_spotify():
-    """Initialize Spotipy client using Client Credentials flow if available."""
-    import spotipy
-    from spotipy.oauth2 import SpotifyClientCredentials
+def _get_itunes_preview_url(title: str, artist: str) -> str | None:
+    """Query iTunes Search API to retrieve a track's preview URL."""
+    import urllib.parse
+    import requests
+    query = f"{title} {artist}"
+    url = f"https://itunes.apple.com/search?term={urllib.parse.quote(query)}&limit=1&entity=musicTrack"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            if results:
+                preview_url = results[0].get("previewUrl")
+                if preview_url:
+                    logger.info("Found iTunes preview URL for '%s' by '%s'", title, artist)
+                    return preview_url
+    except Exception as e:
+        logger.warning("iTunes search failed for '%s' by '%s': %s", title, artist, e)
+    return None
 
-    if not SPOTIPY_CLIENT_ID or not SPOTIPY_CLIENT_SECRET:
-        logger.warning(
-            "Spotify credentials not set (SPOTIPY_CLIENT_ID/SECRET). "
-            "Live Audio Analysis requests will be skipped, using default baselines."
-        )
-        return None
+
+def _extract_complexity_from_url(preview_url: str) -> dict[str, float] | None:
+    """Download audio snippet and compute Harmonic Entropy and Timbral Variance using librosa."""
+    import tempfile
+    import requests
+    import librosa
+    import numpy as np
 
     try:
-        auth_manager = SpotifyClientCredentials(
-            client_id=SPOTIPY_CLIENT_ID,
-            client_secret=SPOTIPY_CLIENT_SECRET,
-        )
-        return spotipy.Spotify(auth_manager=auth_manager)
+        response = requests.get(preview_url, timeout=15)
+        if response.status_code != 200:
+            logger.warning("Failed to download audio preview from %s", preview_url)
+            return None
+
+        # Write to temporary file
+        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as temp_file:
+            temp_file.write(response.content)
+            temp_path = Path(temp_file.name)
+
+        try:
+            # Load audio (CoreAudio on macOS decodes M4A automatically)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="PySoundFile failed. Trying audioread instead.")
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                y, sr = librosa.load(temp_path, sr=None)
+
+            # 1. Calculate Harmonic Entropy (Shannon entropy of normalized chroma)
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+            chroma = chroma.T
+            row_sums = chroma.sum(axis=1, keepdims=True)
+            row_sums = np.where(row_sums == 0, 1e-9, row_sums)
+            p_probs = chroma / row_sums
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                entropy_per_frame = -np.sum(p_probs * np.log2(p_probs + 1e-9), axis=1)
+
+            avg_entropy = float(np.mean(entropy_per_frame))
+
+            # 2. Calculate Timbral Variance (average variance across first 12 MFCCs)
+            mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=12)
+            variances = np.var(mfccs, axis=1)
+            avg_variance = float(np.mean(variances))
+
+            return {
+                "harmonic_entropy": round(avg_entropy, 4),
+                "timbral_variance": round(avg_variance, 4),
+            }
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
     except Exception as e:
-        logger.error("Failed to initialize Spotify client: %s", e)
-        return None
+        logger.warning("Failed to extract complexity from preview %s: %s", preview_url, e)
+    return None
 
 
 def calculate_complexity(analysis_data: dict) -> dict[str, float]:
@@ -116,12 +169,12 @@ def calculate_complexity(analysis_data: dict) -> dict[str, float]:
 def fetch_audio_complexity_batch(
     tracks_df: pd.DataFrame,
     cache_dir: Path = AUDIO_ANALYSIS_CACHE,
-    delay_seconds: float = 1.0,
+    delay_seconds: float = 0.5,
 ) -> pd.DataFrame:
     """
-    Fetch raw Spotify Audio Analysis for unique tracks and calculate complexity metrics.
-
-    Includes local file caching and an offline baseline fallback.
+    Fetch audio analysis features for unique tracks.
+    Uses local cache, pre-compiled CSV lookup, iTunes Search API fallback,
+    and librosa-based offline feature extraction.
 
     Parameters
     ----------
@@ -134,65 +187,99 @@ def fetch_audio_complexity_batch(
     pd.DataFrame with ['track_id', 'harmonic_entropy', 'timbral_variance']
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    sp = _init_spotify()
 
     unique_tracks = tracks_df.drop_duplicates(subset=["track_id"]).copy()
-    
+
+    # Load pre-compiled audio features database for quick CSV preview lookup
+    db_path = DATA_RAW / "Hot 100 Audio Features.csv"
+    preview_lookup = {}
+    if db_path.exists():
+        try:
+            logger.info("Loading pre-compiled Spotify preview URLs from %s", db_path.name)
+            db_df = pd.read_csv(db_path, usecols=["spotify_track_id", "spotify_track_preview_url"])
+            db_df = db_df.dropna(subset=["spotify_track_id", "spotify_track_preview_url"])
+            preview_lookup = dict(zip(db_df["spotify_track_id"], db_df["spotify_track_preview_url"]))
+        except Exception as e:
+            logger.warning("Could not load preview lookup database: %s", e)
+
     entropies = []
     variances = []
-
-    # If no client, fall back to offline baseline defaults immediately
-    if sp is None:
-        logger.info("Using offline baseline fallback for all tracks (no credentials).")
-        unique_tracks["harmonic_entropy"] = 0.5
-        unique_tracks["timbral_variance"] = 100.0
-        return unique_tracks[["track_id", "harmonic_entropy", "timbral_variance"]]
 
     for _, row in tqdm(
         unique_tracks.iterrows(),
         total=len(unique_tracks),
-        desc="Analyzing audio complexity",
+        desc="Analyzing audio complexity (local librosa)",
     ):
         track_id = str(row["track_id"])
-        
-        # Guard against placeholder / empty track IDs
-        if not track_id or track_id.startswith("SongID") or len(track_id) < 15:
-            # Baseline values for invalid IDs
+        title = str(row.get("title", ""))
+        artist = str(row.get("artist", ""))
+
+        # Guard against placeholder / empty / invalid track IDs
+        if not track_id or len(track_id) != 22 or not track_id.isalnum():
             entropies.append(0.5)
             variances.append(100.0)
             continue
 
         cache_file = cache_dir / f"{track_id}.json"
 
-        # Check local cache first
+        # 1. Check local cache first
         if cache_file.exists():
             try:
-                analysis = json.loads(cache_file.read_text())
-                metrics = calculate_complexity(analysis)
+                cache_data = json.loads(cache_file.read_text())
+                if "harmonic_entropy" in cache_data and "timbral_variance" in cache_data:
+                    entropies.append(cache_data["harmonic_entropy"])
+                    variances.append(cache_data["timbral_variance"])
+                    continue
+                metrics = calculate_complexity(cache_data)
                 entropies.append(metrics["harmonic_entropy"])
                 variances.append(metrics["timbral_variance"])
                 continue
             except Exception as e:
                 logger.warning("Failed to load cached analysis for %s: %s. Re-fetching...", track_id, e)
 
-        # Live fetch from Spotify
-        try:
-            analysis = sp.audio_analysis(track_id)
-            
-            # Cache the raw JSON data
-            cache_file.write_text(json.dumps(analysis, ensure_ascii=False, indent=2))
-            
-            metrics = calculate_complexity(analysis)
+        # 2. Not cached: Resolve preview URL (CSV lookup -> iTunes API)
+        preview_url = preview_lookup.get(track_id)
+        is_itunes = False
+
+        if not preview_url:
+            preview_url = _get_itunes_preview_url(title, artist)
+            is_itunes = True
+
+        metrics = None
+        if preview_url:
+            # 3. Extract complexity from preview using librosa
+            metrics = _extract_complexity_from_url(preview_url)
+            if is_itunes:
+                time.sleep(delay_seconds)
+
+        if metrics:
+            cache_data = {
+                "track_id": track_id,
+                "title": title,
+                "artist": artist,
+                "harmonic_entropy": metrics["harmonic_entropy"],
+                "timbral_variance": metrics["timbral_variance"],
+                "source": "local_librosa",
+            }
             entropies.append(metrics["harmonic_entropy"])
             variances.append(metrics["timbral_variance"])
-            
-            # Rate limiting
-            time.sleep(delay_seconds)
-        except Exception as e:
-            logger.warning("Spotify audio analysis failed for track %s: %s", track_id, e)
-            # Offline baseline defaults for failures
+        else:
+            cache_data = {
+                "track_id": track_id,
+                "title": title,
+                "artist": artist,
+                "harmonic_entropy": 0.5,
+                "timbral_variance": 100.0,
+                "source": "local_librosa_failed_fallback",
+            }
             entropies.append(0.5)
             variances.append(100.0)
+
+        # Write to cache
+        try:
+            cache_file.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2))
+        except Exception as e:
+            logger.warning("Failed to write cache for %s: %s", track_id, e)
 
     unique_tracks["harmonic_entropy"] = entropies
     unique_tracks["timbral_variance"] = variances

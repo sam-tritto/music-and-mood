@@ -215,3 +215,52 @@ def _compute_volumetric_shares(
     shares.columns = [f"cluster_{c}" for c in shares.columns]
 
     return shares
+
+
+def sub_cluster_parent_clusters(
+    fused_matrix: np.ndarray,
+    parent_labels: np.ndarray,
+    n_sub_clusters: int = 2,
+    random_state: int = 42,
+) -> np.ndarray:
+    """
+    Perform secondary (sub-clustering) step within each of the parent clusters.
+
+    Parameters
+    ----------
+    fused_matrix : (N, D) scaled feature matrix
+    parent_labels : (N,) array of parent cluster labels
+    n_sub_clusters : number of sub-clusters per parent cluster
+    random_state : for KMeans reproducibility
+
+    Returns
+    -------
+    sub_labels : (N,) array of compound labels (parent_id * 10 + sub_id)
+    """
+    unique_parents = sorted(np.unique(parent_labels))
+    sub_labels = np.full(len(parent_labels), -1, dtype=int)
+
+    for parent_id in unique_parents:
+        if parent_id == -1:
+            continue
+        mask = (parent_labels == parent_id)
+        subset_data = fused_matrix[mask]
+
+        if len(subset_data) < n_sub_clusters:
+            logger.warning(
+                "Parent cluster %d has only %d tracks (< n_sub_clusters=%d). Skipping sub-clustering.",
+                parent_id, len(subset_data), n_sub_clusters
+            )
+            sub_labels[mask] = parent_id * 10
+            continue
+
+        # Run standard KMeans globally within this parent cluster subset
+        kmeans = KMeans(n_clusters=n_sub_clusters, random_state=random_state, n_init=10)
+        local_sub_labels = kmeans.fit_predict(subset_data)
+
+        # Compound label: parent_id * 10 + local_sub_label
+        sub_labels[mask] = parent_id * 10 + local_sub_labels
+
+        logger.info("Parent cluster %d sub-clustered into %d groups.", parent_id, n_sub_clusters)
+
+    return sub_labels

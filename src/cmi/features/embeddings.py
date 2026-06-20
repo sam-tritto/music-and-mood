@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE: int = 100
 
 # Delay between batches to avoid rate limiting
-_BATCH_DELAY_SECONDS: float = 0.5
+_BATCH_DELAY_SECONDS: float = 4.5
 
 # Max retries on transient errors
 _MAX_RETRIES: int = 3
@@ -105,12 +105,21 @@ def embed_lyrics(
                 break
             except Exception as e:
                 if attempt < _MAX_RETRIES - 1:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        "Embedding batch %d failed (attempt %d/%d): %s. "
-                        "Retrying in %ds...",
-                        i, attempt + 1, _MAX_RETRIES, e, wait,
-                    )
+                    # Detect 429 / resource exhaustion / too many requests
+                    err_msg = str(e).lower()
+                    if "429" in err_msg or "resource_exhausted" in err_msg or "quota" in err_msg or "too many requests" in err_msg:
+                        wait = 15 * (attempt + 1)
+                        logger.warning(
+                            "Embedding batch %d hit rate limit (429). Waiting %ds for quota reset...",
+                            i, wait
+                        )
+                    else:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(
+                            "Embedding batch %d failed (attempt %d/%d): %s. "
+                            "Retrying in %ds...",
+                            i, attempt + 1, _MAX_RETRIES, e, wait,
+                        )
                     time.sleep(wait)
                 else:
                     logger.error(

@@ -19,6 +19,10 @@ PRICING_RATES = {
         "input": 0.02,
         "output": 0.0,
     },
+    "gemini-2.5-flash": {
+        "input": 0.30,
+        "output": 2.50,
+    },
     "gemini-3.5-flash": {
         "input": 1.50,
         "output": 9.00,
